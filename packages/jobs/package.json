@@ -23,7 +23,6 @@
     "@carbon/lib": "*",
     "@carbon/notifications": "*",
     "@internationalized/date": "^3.5.2",
-    "@novu/node": "^2.0.1",
     "@react-email/components": "0.3.3",
     "@slack/web-api": "~7.10.0",
     "@supabase/functions-js": "2.1.5",

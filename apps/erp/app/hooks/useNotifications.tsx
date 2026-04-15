@@ -1,18 +1,21 @@
-import { NOVU_API_URL, NOVU_APPLICATION_ID } from "@carbon/auth";
-import { useMount } from "@carbon/react";
-import type { IMessage } from "@novu/headless";
-import { HeadlessService } from "@novu/headless";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCarbon } from "@carbon/auth";
+import type { NotificationEvent } from "@carbon/notifications";
+import { useRealtimeChannel } from "@carbon/react";
+import { useCallback, useEffect, useState } from "react";
 
-export function getSubscriberId({
-  companyId,
-  userId
-}: {
+export type Notification = {
+  id: string;
   companyId: string;
   userId: string;
-}) {
-  return `${companyId}:${userId}`;
-}
+  event: NotificationEvent;
+  recordId: string;
+  description: string;
+  from: string | null;
+  documentType: string | null;
+  read: boolean;
+  seen: boolean;
+  createdAt: string;
+};
 
 export function useNotifications({
   userId,
@@ -21,134 +24,100 @@ export function useNotifications({
   userId: string;
   companyId: string;
 }) {
+  const { carbon } = useCarbon();
   const [isLoading, setLoading] = useState(true);
-  const [notifications, setNotifications] = useState<IMessage[]>([]);
-  const [subscriberId, setSubscriberId] = useState<string>();
-  const headlessServiceRef = useRef<HeadlessService>();
+  const [notifications, setNotifications] = useState<Notification[]>([]);
 
-  const markAllMessagesAsRead = () => {
-    const headlessService = headlessServiceRef.current;
+  const fetchNotifications = useCallback(async () => {
+    const { data, error } = await carbon
+      .from("notification")
+      .select("*")
+      .eq("userId", userId)
+      .eq("companyId", companyId)
+      .order("createdAt", { ascending: false })
+      .limit(50);
 
-    if (headlessService) {
-      setNotifications((prevNotifications) =>
-        prevNotifications.map((notification) => {
-          return {
-            ...notification,
-            read: true
-          };
-        })
-      );
-
-      headlessService.markAllMessagesAsRead({
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        listener: () => {},
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        onError: () => {}
-      });
+    if (error) {
+      console.error("Failed to fetch notifications", error);
+    } else {
+      setNotifications(data as Notification[]);
     }
-  };
+    setLoading(false);
+  }, [carbon, userId, companyId]);
 
-  const markMessageAsRead = (messageId: string) => {
-    const headlessService = headlessServiceRef.current;
+  useEffect(() => {
+    fetchNotifications();
+  }, [fetchNotifications]);
 
-    if (headlessService) {
-      setNotifications((prevNotifications) =>
-        prevNotifications.map((notification) => {
-          if (notification._id === messageId) {
-            return {
-              ...notification,
-              read: true
-            };
+  useRealtimeChannel({
+    topic: `notifications:${userId}`,
+    setup: (channel) =>
+      channel.on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notification",
+          filter: `userId=eq.${userId}`
+        },
+        (payload) => {
+          if (payload.eventType === "INSERT") {
+            setNotifications((prev) => [payload.new as Notification, ...prev]);
+          } else if (payload.eventType === "UPDATE") {
+            setNotifications((prev) =>
+              prev.map((n) =>
+                n.id === (payload.new as Notification).id
+                  ? (payload.new as Notification)
+                  : n
+              )
+            );
           }
-
-          return notification;
-        })
-      );
-
-      headlessService.markNotificationsAsRead({
-        messageId: [messageId],
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        listener: (result) => {},
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        onError: (error) => {}
-      });
-    }
-  };
-
-  const fetchNotifications = useCallback(() => {
-    const headlessService = headlessServiceRef.current;
-
-    if (headlessService) {
-      headlessService.fetchNotifications({
-        // biome-ignore lint/correctness/noEmptyPattern: suppressed due to migration
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        listener: ({}) => {},
-        onSuccess: (response) => {
-          setLoading(false);
-          setNotifications(response.data);
         }
-      });
-    }
-  }, []);
-
-  const markAllMessagesAsSeen = () => {
-    const headlessService = headlessServiceRef.current;
-
-    if (headlessService) {
-      setNotifications((prevNotifications) =>
-        prevNotifications.map((notification) => ({
-          ...notification,
-          seen: true
-        }))
-      );
-      headlessService.markAllMessagesAsSeen({
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        listener: () => {},
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        onError: () => {}
-      });
-    }
-  };
-
-  useMount(() => {
-    setSubscriberId(getSubscriberId({ companyId, userId }));
+      ),
+    dependencies: [userId]
   });
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: suppressed due to migration
-  useEffect(() => {
-    const headlessService = headlessServiceRef.current;
-
-    if (headlessService) {
-      headlessService.listenNotificationReceive({
-        listener: () => {
-          fetchNotifications();
-        }
+  const markAllMessagesAsRead = useCallback(() => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    carbon
+      .from("notification")
+      .update({ read: true })
+      .eq("userId", userId)
+      .eq("companyId", companyId)
+      .eq("read", false)
+      .then(({ error }) => {
+        if (error) console.error("Failed to mark all as read", error);
       });
-    }
-  }, [headlessServiceRef.current]);
+  }, [carbon, userId, companyId]);
 
-  useEffect(() => {
-    if (subscriberId && !headlessServiceRef.current) {
-      const isEu = NOVU_API_URL.includes("eu.");
-      const headlessService = new HeadlessService({
-        applicationIdentifier: NOVU_APPLICATION_ID!,
-        backendUrl: isEu ? "https://eu.api.novu.co" : "https://api.novu.co",
-        socketUrl: isEu ? "wss://eu.ws.novu.co" : undefined, // ← base only, no /socket.io
-        subscriberId
-      });
+  const markMessageAsRead = useCallback(
+    (notificationId: string) => {
+      setNotifications((prev) =>
+        prev.map((n) => (n.id === notificationId ? { ...n, read: true } : n))
+      );
+      carbon
+        .from("notification")
+        .update({ read: true })
+        .eq("id", notificationId)
+        .then(({ error }) => {
+          if (error) console.error("Failed to mark as read", error);
+        });
+    },
+    [carbon]
+  );
 
-      headlessService.initializeSession({
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        listener: () => {},
-        onSuccess: () => {
-          headlessServiceRef.current = headlessService;
-          fetchNotifications();
-        },
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: suppressed due to migration
-        onError: () => {}
+  const markAllMessagesAsSeen = useCallback(() => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, seen: true })));
+    carbon
+      .from("notification")
+      .update({ seen: true })
+      .eq("userId", userId)
+      .eq("companyId", companyId)
+      .eq("seen", false)
+      .then(({ error }) => {
+        if (error) console.error("Failed to mark all as seen", error);
       });
-    }
-  }, [fetchNotifications, subscriberId]);
+  }, [carbon, userId, companyId]);
 
   return {
     isLoading,

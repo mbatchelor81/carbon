@@ -1,9 +1,4 @@
-import {
-  ERP_URL,
-  NOVU_API_URL,
-  NOVU_SECRET_KEY,
-  VERCEL_URL
-} from "@carbon/auth";
+import { ERP_URL, VERCEL_URL } from "@carbon/auth";
 import { getCarbonServiceRole } from "@carbon/auth/client.server";
 import type { Database } from "@carbon/database";
 import {
@@ -11,14 +6,11 @@ import {
   notifyTaskAssigned
 } from "@carbon/ee/notifications";
 import {
-  getSubscriberId,
+  insertNotification,
+  insertNotificationBulk,
   NotificationEvent,
-  NotificationWorkflow,
-  type TriggerPayload,
-  trigger,
-  triggerBulk
+  type NotificationInsert
 } from "@carbon/notifications";
-import { Novu } from "@novu/node";
 import { inngest } from "../../client";
 
 type ApprovalDocumentType = Database["public"]["Enums"]["approvalDocumentType"];
@@ -32,44 +24,6 @@ async function getCompanyIntegrations(
     .from("companyIntegration")
     .select("*")
     .eq("companyId", companyId);
-}
-
-function getWorkflow(type: NotificationEvent) {
-  switch (type) {
-    case NotificationEvent.JobAssignment:
-    case NotificationEvent.JobOperationAssignment:
-    case NotificationEvent.MaintenanceDispatchAssignment:
-    case NotificationEvent.MaintenanceDispatchCreated:
-    case NotificationEvent.NonConformanceAssignment:
-    case NotificationEvent.ProcedureAssignment:
-    case NotificationEvent.PurchaseInvoiceAssignment:
-    case NotificationEvent.PurchaseOrderAssignment:
-    case NotificationEvent.QuoteAssignment:
-    case NotificationEvent.RiskAssignment:
-    case NotificationEvent.SalesOrderAssignment:
-    case NotificationEvent.SalesRfqAssignment:
-    case NotificationEvent.SalesRfqReady:
-    case NotificationEvent.StockTransferAssignment:
-    case NotificationEvent.SupplierQuoteAssignment:
-    case NotificationEvent.TrainingAssignment:
-      return NotificationWorkflow.Assignment;
-    case NotificationEvent.JobCompleted:
-      return NotificationWorkflow.JobCompleted;
-    case NotificationEvent.DigitalQuoteResponse:
-      return NotificationWorkflow.DigitalQuoteResponse;
-    case NotificationEvent.SuggestionResponse:
-      return NotificationWorkflow.SuggestionResponse;
-    case NotificationEvent.SupplierQuoteResponse:
-      return NotificationWorkflow.SupplierQuoteResponse;
-    case NotificationEvent.JobOperationMessage:
-      return NotificationWorkflow.Message;
-    case NotificationEvent.ApprovalApproved:
-    case NotificationEvent.ApprovalRejected:
-    case NotificationEvent.ApprovalRequested:
-      return NotificationWorkflow.Approval;
-    default:
-      return null;
-  }
 }
 
 async function getDescription(
@@ -480,9 +434,6 @@ export const notifyFunction = inngest.createFunction(
   async ({ event, step }) => {
     const payload = event.data;
 
-    const novu = new Novu(NOVU_SECRET_KEY!, {
-      backendUrl: NOVU_API_URL
-    });
     const isLocal =
       VERCEL_URL === undefined || VERCEL_URL.includes("localhost");
 
@@ -492,15 +443,6 @@ export const notifyFunction = inngest.createFunction(
     }
 
     const client = getCarbonServiceRole();
-
-    const workflow = getWorkflow(payload.event);
-
-    if (!workflow) {
-      console.error(`No workflow found for notification type ${payload.event}`);
-      throw new Error(
-        `No workflow found for notification type ${payload.event}`
-      );
-    }
 
     const description = await step.run("get-description", async () => {
       return getDescription(
@@ -576,44 +518,32 @@ export const notifyFunction = inngest.createFunction(
       });
     }
 
-    const baseNotificationPayload = {
-      recordId: payload.documentId,
-      description,
-      event: payload.event,
-      from: payload.from,
-      ...(payload.documentType && { documentType: payload.documentType })
-    };
-
     if (payload.recipient.type === "user") {
       await step.run("send-single-notification", async () => {
-        const novuPayload = {
-          workflow,
-          payload: baseNotificationPayload,
-          user: {
-            subscriberId: getSubscriberId({
-              companyId: payload.companyId,
-              userId:
-                payload.recipient.type === "user"
-                  ? payload.recipient.userId
-                  : ""
-            })
-          }
+        const notification: NotificationInsert = {
+          companyId: payload.companyId,
+          userId:
+            payload.recipient.type === "user" ? payload.recipient.userId : "",
+          event: payload.event,
+          recordId: payload.documentId,
+          description,
+          from: payload.from,
+          ...(payload.documentType && { documentType: payload.documentType })
         };
 
-        console.log("Sending single user notification to Novu", {
+        console.log("Sending single user notification", {
           event: payload.event,
-          workflow,
-          subscriberId: novuPayload.user.subscriberId,
+          userId: notification.userId,
           description,
           documentId: payload.documentId,
           from: payload.from
         });
 
         try {
-          await trigger(novu, novuPayload);
-          console.log("Successfully sent single user notification to Novu");
+          await insertNotification(client, notification);
+          console.log("Successfully sent single user notification");
         } catch (error) {
-          console.error("Error triggering single user notification");
+          console.error("Error inserting single user notification");
           console.error(error);
         }
       });
@@ -646,15 +576,12 @@ export const notifyFunction = inngest.createFunction(
           !Array.isArray(userIds.data) ||
           userIds.data.length === 0
         ) {
-          console.log(
-            `No userIds found for payload - skipping Novu notification`,
-            {
-              event: payload.event,
-              recipientType: payload.recipient.type,
-              recipient: payload.recipient,
-              reason: "No users found in group/users list"
-            }
-          );
+          console.log(`No userIds found for payload - skipping notification`, {
+            event: payload.event,
+            recipientType: payload.recipient.type,
+            recipient: payload.recipient,
+            reason: "No users found in group/users list"
+          });
           return;
         }
 
@@ -665,7 +592,7 @@ export const notifyFunction = inngest.createFunction(
 
         if (filteredUserIds.length === 0) {
           console.log(
-            `No recipients after filtering sender - skipping Novu notification`,
+            `No recipients after filtering sender - skipping notification`,
             {
               event: payload.event,
               originalUserCount: userIds.data.length,
@@ -676,41 +603,40 @@ export const notifyFunction = inngest.createFunction(
           return;
         }
 
-        const notificationPayloads: TriggerPayload[] =
-          [...new Set(filteredUserIds)].map((userId) => ({
-            workflow,
-            payload: baseNotificationPayload,
-            user: {
-              subscriberId: getSubscriberId({
-                companyId: payload.companyId,
-                userId: userId
-              })
-            }
-          })) ?? [];
+        const notifications: NotificationInsert[] = [
+          ...new Set(filteredUserIds)
+        ].map((userId) => ({
+          companyId: payload.companyId,
+          userId,
+          event: payload.event,
+          recordId: payload.documentId,
+          description,
+          from: payload.from,
+          ...(payload.documentType && { documentType: payload.documentType })
+        }));
 
-        if (notificationPayloads.length > 0) {
-          console.log("Sending bulk notifications to Novu", {
+        if (notifications.length > 0) {
+          console.log("Sending bulk notifications", {
             event: payload.event,
-            workflow,
-            recipientCount: notificationPayloads.length,
+            recipientCount: notifications.length,
             description,
             documentId: payload.documentId,
             from: payload.from,
-            subscriberIds: notificationPayloads.map((p) => p.user.subscriberId)
+            userIds: notifications.map((n) => n.userId)
           });
 
           try {
-            await triggerBulk(novu, notificationPayloads.flat());
+            await insertNotificationBulk(client, notifications);
             console.log(
-              `Successfully sent ${notificationPayloads.length} bulk notifications to Novu`
+              `Successfully sent ${notifications.length} bulk notifications`
             );
           } catch (error) {
-            console.error("Error triggering bulk notifications");
+            console.error("Error inserting bulk notifications");
             console.error(error);
           }
         } else {
           console.log(
-            `No notification payloads generated - skipping Novu notification`,
+            `No notification payloads generated - skipping notification`,
             {
               event: payload.event,
               reason: "Empty notification payloads array"
