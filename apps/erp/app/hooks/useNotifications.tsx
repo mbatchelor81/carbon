@@ -50,7 +50,7 @@ export function useNotifications({
   }, [fetchNotifications]);
 
   useRealtimeChannel({
-    topic: `notifications:${userId}`,
+    topic: `notifications:${userId}:${companyId}`,
     setup: (channel) =>
       channel.on(
         "postgres_changes",
@@ -61,20 +61,20 @@ export function useNotifications({
           filter: `userId=eq.${userId}`
         },
         (payload) => {
+          const newNotification = payload.new as Notification;
+          if (newNotification.companyId !== companyId) return;
           if (payload.eventType === "INSERT") {
-            setNotifications((prev) => [payload.new as Notification, ...prev]);
+            setNotifications((prev) => [newNotification, ...prev]);
           } else if (payload.eventType === "UPDATE") {
             setNotifications((prev) =>
               prev.map((n) =>
-                n.id === (payload.new as Notification).id
-                  ? (payload.new as Notification)
-                  : n
+                n.id === newNotification.id ? newNotification : n
               )
             );
           }
         }
       ),
-    dependencies: [userId]
+    dependencies: [userId, companyId]
   });
 
   const markAllMessagesAsRead = useCallback(() => {
