@@ -1,13 +1,9 @@
-import { NOVU_API_URL, NOVU_SECRET_KEY } from "@carbon/auth";
 import { getCarbonServiceRole } from "@carbon/auth/client.server";
-import type { TriggerPayload } from "@carbon/notifications";
 import {
-  getSubscriberId,
+  insertNotificationBulk,
   NotificationEvent,
-  NotificationWorkflow,
-  triggerBulk
+  type NotificationInsert
 } from "@carbon/notifications";
-import { Novu } from "@novu/node";
 import { inngest } from "../../client";
 
 export const cleanupFunction = inngest.createFunction(
@@ -15,9 +11,6 @@ export const cleanupFunction = inngest.createFunction(
   { cron: "0 7,12,17 * * *" },
   async ({ step }) => {
     const serviceRole = getCarbonServiceRole();
-    const novu = new Novu(NOVU_SECRET_KEY!, {
-      backendUrl: NOVU_API_URL
-    });
 
     await step.run("expire-quotes-and-rfqs", async () => {
       console.log(`Starting cleanup tasks: ${new Date().toISOString()}`);
@@ -132,34 +125,22 @@ export const cleanupFunction = inngest.createFunction(
           return;
         }
 
-        const notificationPayloads: TriggerPayload[] = expiredQuotes.data
+        const notifications: NotificationInsert[] = expiredQuotes.data
           .filter((quote) => Boolean(quote.salesPersonId))
-          .map((quote) => {
-            return {
-              workflow: NotificationWorkflow.Expiration,
-              payload: {
-                documentId: quote.id,
-                event: NotificationEvent.QuoteExpired,
-                recordId: quote.id,
-                description: `Quote ${quote.quoteId} has expired`
-              },
-              user: {
-                subscriberId: getSubscriberId({
-                  companyId: quote.companyId,
-                  userId: quote.salesPersonId!
-                })
-              }
-            };
-          });
+          .map((quote) => ({
+            companyId: quote.companyId,
+            userId: quote.salesPersonId!,
+            event: NotificationEvent.QuoteExpired,
+            recordId: quote.id,
+            description: `Quote ${quote.quoteId} has expired`
+          }));
 
-        if (notificationPayloads.length > 0) {
-          console.log(
-            `Triggering ${notificationPayloads.length} notifications`
-          );
+        if (notifications.length > 0) {
+          console.log(`Triggering ${notifications.length} notifications`);
           try {
-            await triggerBulk(novu, notificationPayloads.flat());
+            await insertNotificationBulk(serviceRole, notifications);
           } catch (error) {
-            console.error("Error triggering notifications");
+            console.error("Error inserting notifications");
             console.error(error);
           }
         } else {
@@ -218,7 +199,7 @@ export const cleanupFunction = inngest.createFunction(
             ])
           );
 
-          const gaugeNotificationPayloads: TriggerPayload[] = [];
+          const gaugeNotifications: NotificationInsert[] = [];
 
           // Create notification payloads for each gauge
           for (const gauge of outOfCalibrationGauges.data) {
@@ -236,38 +217,27 @@ export const cleanupFunction = inngest.createFunction(
 
             // Create notification payloads for each user in the notification group
             for (const userId of notificationGroup) {
-              gaugeNotificationPayloads.push({
-                workflow: NotificationWorkflow.GaugeCalibration,
-                payload: {
-                  event: NotificationEvent.GaugeCalibrationExpired,
-                  recordId: gauge.id,
-                  description: `Gauge ${gauge.gaugeId} is out of calibration`
-                },
-                user: {
-                  subscriberId: getSubscriberId({
-                    companyId: gauge.companyId,
-                    userId
-                  })
-                }
+              gaugeNotifications.push({
+                companyId: gauge.companyId,
+                userId,
+                event: NotificationEvent.GaugeCalibrationExpired,
+                recordId: gauge.id,
+                description: `Gauge ${gauge.gaugeId} is out of calibration`
               });
             }
           }
 
-          if (gaugeNotificationPayloads.length > 0) {
+          if (gaugeNotifications.length > 0) {
             console.log(
-              `Triggering ${gaugeNotificationPayloads.length} gauge calibration notifications`
+              `Triggering ${gaugeNotifications.length} gauge calibration notifications`
             );
             try {
-              await triggerBulk(novu, gaugeNotificationPayloads);
+              await insertNotificationBulk(serviceRole, gaugeNotifications);
 
               // Update lastCalibrationStatus for gauges that had notifications sent
               // Extract unique gauge IDs from the notification payloads
               const gaugeIdsToUpdate = [
-                ...new Set(
-                  gaugeNotificationPayloads.map(
-                    (payload) => payload.payload.recordId
-                  )
-                )
+                ...new Set(gaugeNotifications.map((n) => n.recordId))
               ];
 
               const updateGauges = await serviceRole
@@ -287,7 +257,7 @@ export const cleanupFunction = inngest.createFunction(
                 );
               }
             } catch (error) {
-              console.error("Error triggering gauge calibration notifications");
+              console.error("Error inserting gauge calibration notifications");
               console.error(error);
             }
           } else {

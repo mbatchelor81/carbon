@@ -488,19 +488,19 @@ const Notifications = () => {
                   {unreadNotifications.map((notification) => {
                     return (
                       <GenericNotification
-                        key={notification._id}
-                        id={notification.payload.recordId as string}
+                        key={notification.id}
+                        id={notification.recordId}
                         createdAt={notification.createdAt}
-                        description={notification.payload.description as string}
-                        event={notification.payload.event as NotificationEvent}
-                        from={notification.payload.from as string | undefined}
+                        description={notification.description}
+                        event={notification.event as NotificationEvent}
+                        from={notification.from ?? undefined}
                         documentType={
-                          notification.payload.documentType as
+                          (notification.documentType as
                             | ApprovalDocumentType
-                            | undefined
+                            | undefined) ?? undefined
                         }
                         markMessageAsRead={() =>
-                          markMessageAsRead(notification._id)
+                          markMessageAsRead(notification.id)
                         }
                         onClose={() => setOpen(false)}
                       />
@@ -560,16 +560,16 @@ const Notifications = () => {
                   {archivedNotifications.map((notification) => {
                     return (
                       <GenericNotification
-                        key={notification._id}
-                        id={notification.payload.recordId as string}
+                        key={notification.id}
+                        id={notification.recordId}
                         createdAt={notification.createdAt}
-                        description={notification.payload.description as string}
-                        event={notification.payload.event as NotificationEvent}
-                        from={notification.payload.from as string | undefined}
+                        description={notification.description}
+                        event={notification.event as NotificationEvent}
+                        from={notification.from ?? undefined}
                         documentType={
-                          notification.payload.documentType as
+                          (notification.documentType as
                             | ApprovalDocumentType
-                            | undefined
+                            | undefined) ?? undefined
                         }
                         onClose={() => setOpen(false)}
                       />

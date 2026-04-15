@@ -1,10 +1,8 @@
 /// <reference types="node" />
 import type { Database } from "@carbon/database";
-import { nanoid } from "nanoid";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 type ApprovalDocumentType = Database["public"]["Enums"]["approvalDocumentType"];
-
-const API_ENDPOINT = "https://api.novu.co/v1";
 
 export enum NotificationWorkflow {
   Approval = "approval",
@@ -58,10 +56,6 @@ export enum NotificationType {
   SupplierQuoteResponseInApp = "supplier-quote-response-in-app"
 }
 
-export type TriggerUser = {
-  subscriberId: string;
-};
-
 export type NotificationPayload = {
   recordId: string;
   description: string;
@@ -70,120 +64,83 @@ export type NotificationPayload = {
   documentType?: ApprovalDocumentType;
 };
 
-export type TriggerPayload = {
-  workflow: NotificationWorkflow;
-  payload: NotificationPayload;
-  user: TriggerUser;
-  replyTo?: string;
-  tenant?: string; // NOTE: Currently no way to listen for messages with tenant, we use user id + company id for unique
-};
-
-export function getSubscriberId({
-  companyId,
-  userId
-}: {
+export type NotificationInsert = {
   companyId: string;
   userId: string;
-}) {
-  return `${companyId}:${userId}`;
-}
+  event: NotificationEvent;
+  recordId: string;
+  description: string;
+  from?: string;
+  documentType?: string;
+};
 
-export async function trigger(novu: any, data: TriggerPayload) {
-  try {
-    await novu.trigger(data.workflow, {
-      to: data.user,
-      payload: data.payload,
-      tenant: data.tenant,
-      overrides: {
-        email: {
-          replyTo: data.replyTo,
-          headers: {
-            "X-Entity-Ref-ID": nanoid()
-          }
-        }
-      }
-    });
-  } catch (error) {
-    console.log(error);
+export async function insertNotification(
+  client: SupabaseClient,
+  notification: NotificationInsert
+) {
+  const { error } = await client.from("notification").insert(notification);
+  if (error) {
+    console.error("Failed to insert notification", error);
+    throw error;
   }
 }
 
-export async function triggerBulk(novu: any, events: TriggerPayload[]) {
-  try {
-    await novu.bulkTrigger(
-      events.map((data) => ({
-        name: data.workflow,
-        to: data.user,
-        payload: data.payload,
-        tenant: data.tenant,
-        overrides: {
-          email: {
-            replyTo: data.replyTo,
-            headers: {
-              "X-Entity-Ref-ID": nanoid()
-            }
-          }
-        }
-      }))
-    );
-  } catch (error) {
-    console.log(error);
+export async function insertNotificationBulk(
+  client: SupabaseClient,
+  notifications: NotificationInsert[]
+) {
+  if (notifications.length === 0) return;
+  const { error } = await client.from("notification").insert(notifications);
+  if (error) {
+    console.error("Failed to insert bulk notifications", error);
+    throw error;
   }
 }
 
-type GetSubscriberPreferencesParams = {
-  teamId: string;
-  subscriberId: string;
-};
-
-export async function getSubscriberPreferences({
-  subscriberId,
-  teamId
-}: GetSubscriberPreferencesParams) {
-  const response = await fetch(
-    `${API_ENDPOINT}/subscribers/${teamId}_${subscriberId}/preferences`,
-    {
-      method: "GET",
-      headers: {
-        Authorization: `ApiKey ${process.env.NOVU_SECRET_KEY!}`
-      }
-    }
-  );
-
-  return response.json();
+export async function markNotificationRead(
+  client: SupabaseClient,
+  notificationId: string
+) {
+  const { error } = await client
+    .from("notification")
+    .update({ read: true })
+    .eq("id", notificationId);
+  if (error) {
+    console.error("Failed to mark notification as read", error);
+    throw error;
+  }
 }
 
-type UpdateSubscriberPreferenceParams = {
-  subscriberId: string;
-  teamId: string;
-  templateId: string;
-  type: string;
-  enabled: boolean;
-};
+export async function markAllNotificationsRead(
+  client: SupabaseClient,
+  userId: string,
+  companyId: string
+) {
+  const { error } = await client
+    .from("notification")
+    .update({ read: true })
+    .eq("userId", userId)
+    .eq("companyId", companyId)
+    .eq("read", false);
+  if (error) {
+    console.error("Failed to mark all notifications as read", error);
+    throw error;
+  }
+}
 
-export async function updateSubscriberPreference({
-  subscriberId,
-  teamId,
-  templateId,
-  type,
-  enabled
-}: UpdateSubscriberPreferenceParams) {
-  const response = await fetch(
-    `${API_ENDPOINT}/subscribers/${teamId}_${subscriberId}/preferences/${templateId}`,
-    {
-      method: "PATCH",
-      headers: {
-        Authorization: `ApiKey ${process.env.NOVU_SECRET_KEY!}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        channel: {
-          type,
-          enabled
-        }
-      })
-    }
-  );
-
-  return response.json();
+export async function markAllNotificationsSeen(
+  client: SupabaseClient,
+  userId: string,
+  companyId: string
+) {
+  const { error } = await client
+    .from("notification")
+    .update({ seen: true })
+    .eq("userId", userId)
+    .eq("companyId", companyId)
+    .eq("seen", false);
+  if (error) {
+    console.error("Failed to mark all notifications as seen", error);
+    throw error;
+  }
 }
